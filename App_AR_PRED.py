@@ -217,7 +217,7 @@ if subm:
     }
     X_new = pd.DataFrame([row])[FEAT_COLS]
     pred  = int(model.predict(X_new)[0])
-    if pred=0:
+    if pred==0:
         st.success(f"✅ Pago estimado {abs(pred):.1f} días antes del vencimiento.")
     else:
         st.error(f"⏰ Retraso estimado de {pred:.1f} días.")
