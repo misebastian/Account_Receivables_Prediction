@@ -1,10 +1,9 @@
 streamlit
 pandas
 numpy
-openpyxl          
+openpyxl    
+plotly
+statsmodels
 scikit-learn
 xgboost
-tensorflow
-statsmodels
 joblib
-plotly
