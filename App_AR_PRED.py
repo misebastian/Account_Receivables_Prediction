@@ -1,166 +1,162 @@
-# ─────────────────────────────────────────────────────────────
-# App_AR_PRED.py · Streamlit v5 (selector global + análisis)
-# ─────────────────────────────────────────────────────────────
-import warnings, base64, io, datetime as dt
+# ──────────────────────────────────────────────────────────────
+#  AR Predictor · Streamlit v6 (compact-dark) – 25 Abr 2025
+# ──────────────────────────────────────────────────────────────
+import warnings, json, base64, io
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
+import plotly.express as px
+from scipy.stats import iqr
 import joblib
-from scipy.stats import iqr, skew, kurtosis
 
+st.set_page_config("AR Predictor", "😎", layout="wide", initial_sidebar_state="expanded")
 warnings.filterwarnings("ignore")
-st.set_page_config("AR Predictor", "📈", "wide")
 
-# ── Archivos requeridos
-DATA_FILE  = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
-MODEL_FILE = Path("ar_pipeline.pkl")
+#───────────  utilidades  ──────────────────────────────────────
+DATA_FILE  = Path(__file__).with_name("WA_Fn-UseC_-Accounts-Receivable.xlsx")
+MODEL_FILE = Path(__file__).with_name("ar_pipeline.pkl")
 
-# ╭───────────────────────────────────────╮
-# │ 1 · Carga de datos y pipeline         │
-# ╰───────────────────────────────────────╯
+FEAT_COLS = ["countryCode","InvoiceAmount","Disputed","PaperlessBill","DaysToSettle",
+             "InvoiceDate_year","InvoiceDate_month","InvoiceDate_day",
+             "DueDate_year","DueDate_month","DueDate_day"]
+
+def format_big(x): return f"{x:,.0f}".replace(",", " ")
+
+#───────────  carga datos + modelo  ────────────────────────────
 @st.cache_data(show_spinner=False)
-def load_raw(fp):
+def load_data(fp)->pd.DataFrame:
     df = pd.read_excel(fp)
     df.columns = df.columns.str.strip().str.replace(" ", "_")
-    df["Disputed"]      = df["Disputed"].map({"Yes": 1, "No": 0})
-    df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic": 1, "Paper": 0})
-    for c in ["InvoiceDate", "DueDate"]:
-        df[c] = pd.to_datetime(df[c])
-        df[[f"{c}_year", f"{c}_month", f"{c}_day"]] = np.c_[
-            df[c].dt.year, df[c].dt.month, df[c].dt.day]
+    df["Disputed"]      = df["Disputed"].map({"Yes":1,"No":0})
+    df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic":1,"Paper":0})
+    for c in ["InvoiceDate","DueDate"]:
+        dt = pd.to_datetime(df[c])
+        df[[f"{c}_year",f"{c}_month",f"{c}_day"]] = np.c_[dt.dt.year,dt.dt.month,dt.dt.day]
     return df
 
 @st.cache_resource(show_spinner=False)
-def load_pipe(fp):
+def load_model(fp):
     return joblib.load(fp)
 
-if not (DATA_FILE.exists() and MODEL_FILE.exists()):
-    st.error("🚫  Faltan archivos en el repositorio.")
-    st.stop()
+raw_df       = load_data(DATA_FILE)
+model        = load_model(MODEL_FILE)
 
-df = load_raw(DATA_FILE)
-pipe = load_pipe(MODEL_FILE)
+#───────────  KPIs (encabezado)  ───────────────────────────────
+st.markdown("## 📊 *Exploratorio* – Accounts Receivable")
 
-FEATS = ["countryCode","InvoiceAmount","Disputed","PaperlessBill","DaysToSettle",
-         "InvoiceDate_year","InvoiceDate_month","InvoiceDate_day",
-         "DueDate_year","DueDate_month","DueDate_day"]
-
-# ╭───────────────────────────────────────╮
-# │ 2 · KPI compactos                     │
-# ╰───────────────────────────────────────╯
-st.markdown("""
-<style>
-.small-card {padding:0.2rem 0.4rem !important}
-.metric .metric-label{font-size:0.75rem;color:gray}
-.metric .metric-value{font-size:1.05rem}
-section[data-testid="stSidebar"]>div:first-child {width:240px}
-#MainMenu, footer {visibility:hidden}
-</style>""", unsafe_allow_html=True)
+tot_inv  = len(raw_df)
+unique_c = raw_df.customerID.nunique()
+late_pct = (raw_df.DaysLate>0).mean()*100
+avg_dl   = raw_df.DaysLate.mean()
 
 k1,k2,k3,k4 = st.columns(4)
-k1.metric("Facturas", f"{len(df):,}")
-k2.metric("Clientes", f"{df.customerID.nunique():,}")
-k3.metric("Retraso medio", f"{df.DaysLate.mean():.1f} d")
-k4.metric("% puntuales", f"{(df.DaysLate<=0).mean()*100:.1f}%")
+k1.metric("Facturas", format_big(tot_inv))
+k2.metric("Clientes únicos", format_big(unique_c))
+k3.metric("% Con retraso", f"{late_pct:.1f}%")
+k4.metric("DaysLate medio", f"{avg_dl:.1f}")
 
-# ╭───────────────────────────────────────╮
-# │ 3 · Selector global y visualización   │
-# ╰───────────────────────────────────────╯
-all_cols = df.columns.tolist()
+st.divider()
+
+#───────────  selector de variable + gráficas  ─────────────────
+all_cols = raw_df.columns.tolist()
 sel = st.sidebar.selectbox("Variable para explorar", all_cols, index=all_cols.index("InvoiceAmount"))
+st.subheader(f"🔎 Análisis de **{sel}**")
 
-st.subheader(f"🔎 Análisis de **{sel}**", divider="gray")
+def draw_conclusion(txt, emoji="💡"):
+    st.markdown(f"{emoji} {txt}")
 
-if pd.api.types.is_numeric_dtype(df[sel]):
-    colA,colB = st.columns(2)
-    colA.plotly_chart(
-        px.histogram(df, x=sel, nbins=40, height=250,
-                     color_discrete_sequence=["#2980b9"]), use_container_width=True)
-    colB.plotly_chart(
-        px.box(df, y=sel, height=250,
-               color_discrete_sequence=["#c0392b"]), use_container_width=True)
-else:
-    st.plotly_chart(
-        px.bar(df[sel].value_counts().reset_index(),
-               x="index", y=sel, height=300,
-               labels={"index":sel,"y":"Frecuencia"},
-               color_discrete_sequence=["#27ae60"]),
-        use_container_width=True)
+if pd.api.types.is_numeric_dtype(raw_df[sel]):           # NUMÉRICA
+    colL,colR = st.columns(2)
+    colL.plotly_chart(px.histogram(raw_df,x=sel,nbins=40,
+                                   color_discrete_sequence=["#2a9df4"],
+                                   height=260), use_container_width=True)
+    colR.plotly_chart(px.box(raw_df,y=sel,
+                             color_discrete_sequence=["#e74c3c"],
+                             height=260), use_container_width=True)
 
-# ── Estadística descriptiva extendida
-with st.expander("📊  Estadísticos y ejemplos"):
-    desc = df[sel].describe(include="all").to_frame().T
-    if pd.api.types.is_numeric_dtype(df[sel]):
-        desc["median"]   = df[sel].median()
-        desc["IQR"]      = iqr(df[sel])
-        desc["cv"]       = df[sel].std()/df[sel].mean()
-    st.dataframe(desc.round(3))
+    desc = pd.Series({
+        "suma":   raw_df[sel].sum(),
+        "media":  raw_df[sel].mean(),
+        "mediana":raw_df[sel].median(),
+        "std":    raw_df[sel].std(),
+        "IQR":    iqr(raw_df[sel])
+    }).to_frame("valor").round(3)
+    st.dataframe(desc)
 
-    c_top, c_bot = st.columns(2)
-    c_top.markdown("**Top-5**")
-    c_top.dataframe(df.nlargest(5, sel)[[sel]].reset_index(drop=True))
-    c_bot.markdown("**Bottom-5**")
-    c_bot.dataframe(df.nsmallest(5, sel)[[sel]].reset_index(drop=True))
+    # correlación sencilla con DaysLate
+    corr = raw_df[[sel,"DaysLate"]].corr().iloc[0,1]
+    draw_conclusion(f"Correlación con **DaysLate**: {corr:+.2f}")
 
-# ╭───────────────────────────────────────╮
-# │ 4 · Vista especial de DaysLate        │
-# ╰───────────────────────────────────────╯
-with st.expander("⏱  Análisis de la variable objetivo (DaysLate)", expanded=False):
-    dl = df["DaysLate"]
-    h = px.histogram(dl, nbins=40, marginal="rug",
-                     title="Distribución de DaysLate",
-                     color_discrete_sequence=["#8e44ad"])
-    st.plotly_chart(h, use_container_width=True)
+else:                                                    # CATEGÓRICA
+    vc = (raw_df[sel].astype(str)
+                     .value_counts()
+                     .rename_axis(sel)
+                     .reset_index(name="count")
+                     .head(30))
+    st.plotly_chart(px.bar(vc,x=sel,y="count",
+                           color_discrete_sequence=["#27ae60"],
+                           height=300), use_container_width=True)
 
-    stats = pd.Series({
-        "mean": dl.mean(), "median": dl.median(),
-        "IQR": iqr(dl), "skew": skew(dl), "kurtosis": kurtosis(dl)
-    }).round(3)
-    st.write("**Resúmen numérico**")
-    st.dataframe(stats.to_frame("value"))
+    agg = (raw_df.groupby(sel)
+                   .agg(facturas=("invoiceNumber","count"),
+                        suma_monto=("InvoiceAmount","sum"),
+                        retraso_medio=("DaysLate","mean"))
+                   .sort_values("facturas",ascending=False)
+                   .head(10).round(2))
+    st.dataframe(agg)
 
-    worst = (df.groupby("customerID")["DaysLate"]
-               .mean().sort_values(ascending=False).head(10).round(1))
-    st.write("**Clientes con mayor retraso medio:**")
-    st.table(worst)
+    worst = agg.retraso_medio.nlargest(3).index.astype(str)
+    draw_conclusion(f"Mayores retrasos medios en: {', '.join(worst)}.")
 
-# ╭───────────────────────────────────────╮
-# │ 5 · Formulario de predicción          │
-# ╰───────────────────────────────────────╯
-st.header("🎯 Predicción de DaysLate", divider="gray")
+#───────────  matriz de correlación pequeña  ──────────────────
+with st.expander("Matriz de correlación (numéricas)", expanded=False):
+    num = raw_df.select_dtypes(float)
+    corr = num.corr().round(2)
+    st.plotly_chart(px.imshow(corr, text_auto=True,
+                              color_continuous_scale="RdBu_r",
+                              aspect="auto",
+                              height=500), use_container_width=True)
+
+st.divider()
+
+#───────────  PREDICCIÓN interactiva  ─────────────────────────
+st.markdown("## 🧮 Predicción de **DaysLate**")
+
 with st.form("pred"):
-    c1,c2 = st.columns(2)
-    # Columna izquierda
-    cc   = c1.selectbox("countryCode", sorted(df.countryCode.unique()))
-    amt  = c1.number_input("InvoiceAmount", 0.0, 1e6, 50.0, step=10.0)
-    disp = c1.selectbox("Disputed", ["No","Yes"])
-    pbl  = c1.selectbox("PaperlessBill", ["Paper","Electronic"])
-    dts  = c1.number_input("DaysToSettle", 0, 120, 30)
+    l,r = st.columns(2)
+    cc      = l.selectbox("countryCode", sorted(raw_df.countryCode.unique()))
+    inv_amt = l.number_input("InvoiceAmount", 0.0, 1e7, 50.0, step=10.0)
+    disputed= l.selectbox("Disputed", ["No","Yes"])
+    paper   = l.selectbox("PaperlessBill", ["Paper","Electronic"])
+    days_set= l.number_input("DaysToSettle", 0, 365, 30, step=1)
 
-    # Columna derecha
-    inv  = c2.date_input("InvoiceDate", dt.date(2013, 9, 1))
-    due  = c2.date_input("DueDate",    dt.date(2013,10, 1))
+    inv_date= r.date_input("InvoiceDate", pd.Timestamp("2013-09-01"))
+    due_date= r.date_input("DueDate",   pd.Timestamp("2013-10-01"))
 
-    ok = st.form_submit_button("Predecir")
+    submit  = st.form_submit_button("Predecir")
 
-if ok:
+if submit:
     row = {
-        "countryCode": cc, "InvoiceAmount": amt,
-        "Disputed": 1 if disp=="Yes" else 0,
-        "PaperlessBill": 1 if pbl=="Electronic" else 0,
-        "DaysToSettle": dts,
-        "InvoiceDate_year":  inv.year, "InvoiceDate_month": inv.month, "InvoiceDate_day": inv.day,
-        "DueDate_year":      due.year, "DueDate_month":    due.month, "DueDate_day":    due.day
+        "countryCode":      float(cc),
+        "InvoiceAmount":    float(inv_amt),
+        "Disputed":         1.0 if disputed=="Yes" else 0.0,
+        "PaperlessBill":    1.0 if paper=="Electronic" else 0.0,
+        "DaysToSettle":     float(days_set),
+        "InvoiceDate_year": inv_date.year,
+        "InvoiceDate_month":inv_date.month,
+        "InvoiceDate_day":  inv_date.day,
+        "DueDate_year":     due_date.year,
+        "DueDate_month":    due_date.month,
+        "DueDate_day":      due_date.day
     }
-    Xnew = pd.DataFrame([row])[FEATS]
-    pred = float(pipe.predict(Xnew)[0])
-    if pred <= 0:
-        st.success(f"✅ Pago estimado **{abs(pred):.1f} d antes** del vencimiento.")
-    else:
-        st.error(f"🚨 Retraso estimado de **{pred:.1f} días**.")
+    X_new = pd.DataFrame([row])[FEAT_COLS]
+    pred  = float(model.predict(X_new)[0])
 
-st.caption("© 2025 – Demo Accounts Receivable Prediction | v5")
+    if pred <= 0:
+        st.success(f"🎉 Pago estimado **{abs(pred):.1f} días antes** del vencimiento.")
+    else:
+        st.error(f"⏰ Retraso estimado de **{pred:.1f} días**.")
+
+st.caption("© 2025 – Demo Accounts Receivable Prediction")
+
