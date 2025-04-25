@@ -95,7 +95,7 @@ k3.metric("Importe medio / cliente", f"${avg_amt_per_cust:,.0f}")
 k4.metric("Retrasos >60d", int(aging[">60d"]))
 
 # ─────────────────────────────────────────  EDA  (variable seleccionada)
-st.markdown("### 🔍 Análisis de variable")
+st.markdown("### 🔍 Predicción de morosidad en cuentas por cobrar mediante técnicas de Machine Learning")
 sel = st.selectbox("Variable para explorar", df.columns,
                    index=df.columns.get_loc("InvoiceAmount"))
 
