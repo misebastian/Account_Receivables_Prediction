@@ -6,3 +6,4 @@ xgboost
 tensorflow-cpu 
 joblib      
 plotly            
+openpyxl
