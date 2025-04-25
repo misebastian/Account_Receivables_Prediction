@@ -1,164 +1,139 @@
-# ░░ EDA + XGB Predictor | Accounts Receivable ░░
-# ── 2025-04 – versión multi-variable + bug-fix ───────────────
-import warnings, io, base64
-warnings.filterwarnings("ignore")
+# -----------------------------------------------------------
+# Streamlit – EDA interactivo + predicción DaysLate (XGB)
+# 25-abr-2025 – carga modelo .pkl (no re-entrena)
+# -----------------------------------------------------------
+
+import warnings, json, joblib
+from pathlib import Path
+from datetime import date
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px, plotly.graph_objects as go
-from sklearn.model_selection import train_test_split
+import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from xgboost import XGBRegressor
-import joblib, statsmodels.api as sm   # para OLS trendline
 
-# ═════════════ CONFIG UI ═════════════
-st.set_page_config("AR EDA + Predictor", "📈", layout="wide")
-st.markdown(
-    """
+# ──────────────────────────  configuración  ──────────────────────────
+st.set_page_config(page_title="📈 AR Prediction", page_icon="💰", layout="centered")
+st.markdown("""
 <style>
-.main .block-container{max-width:960px; padding-top:1rem}
-section[data-testid="stSidebar"]>div:first-child{width:240px}
-#MainMenu, footer{visibility:hidden}
-h1,h2,h3{font-weight:800}
+:root { --primary-color:#2a9df4; --text-color:#e0e0e0; }
+footer, #MainMenu {visibility:hidden;}
+/* reduce ancho del sidebar */
+section[data-testid="stSidebar"] > div:first-child {width:240px;}
+/* tablas oscuras */
+thead tr th {background-color:#111!important; color:#e0e0e0!important;}
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
+warnings.filterwarnings("ignore")
 
-# ═════════════ CARGA DE DATOS ════════
-FILE = "WA_Fn-UseC_-Accounts-Receivable.xlsx"
-df_raw = pd.read_excel(FILE)
-df_raw.columns = df_raw.columns.str.strip().str.replace(" ", "_")
+# ─────────────────────────  rutas de ficheros  ────────────────────────
+DATA_FILE   = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
+MODEL_FILE  = Path("xgb_model.pkl")               # ya entrenado
+META_FILE   = Path("model_meta.json")             # opcional
 
-# Pre-procesado mínimo
-df = df_raw.copy()
-df["Disputed"]      = df["Disputed"].map({"Yes": 1, "No": 0})
-df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic": 1, "Paper": 0})
-df["countryCode"]   = df["countryCode"].astype("category").cat.codes
+# ────────────────────────────  carga datos  ───────────────────────────
+@st.cache_data(show_spinner="Cargando datos…")
+def load_data(fp: Path) -> pd.DataFrame:
+    df = pd.read_excel(fp)
+    df.columns = df.columns.str.strip().str.replace(" ", "_")
+    # codificación mínima
+    df["Disputed"]      = df["Disputed"].map({"Yes": 1, "No": 0})
+    df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic": 1, "Paper": 0})
+    df["countryCode"]   = df["countryCode"].astype("category")
+    return df
 
+if not DATA_FILE.exists():
+    st.error("❌ No se encontró el Excel de cuentas por cobrar.")
+    st.stop()
+
+raw_df = load_data(DATA_FILE)
 num_cols = ["InvoiceAmount", "DaysToSettle", "DaysLate"]
 
-# ═════════════ SIDEBAR ═══════════════
-st.sidebar.header("Variables numéricas")
-sel_nums = st.sidebar.multiselect(
-    "Elige una o varias variables para explorar",
-    num_cols,
-    default=[num_cols[0]],
-)
+# ──────────────────────────────  EDA  ────────────────────────────────
+st.title("Exploratorio de cuentas por cobrar")
 
-# ── variable para el scatter
-otras = [c for c in num_cols if c not in sel_nums]
-otra_var = st.sidebar.selectbox("Variable para scatter", otras or num_cols)
+kpi1, kpi2 = st.columns(2)
+kpi1.metric("Media DaysLate",  f"{raw_df['DaysLate'].mean():.2f}")
+kpi2.metric("Desv. típica",   f"{raw_df['DaysLate'].std():.2f}")
 
-# ═════════════ ENCABEZADO ════════════
-st.title("Análisis Exploratorio – Accounts Receivable")
+with st.expander("📋  Tabla descriptiva"):
+    st.dataframe(raw_df[num_cols + ["Disputed","PaperlessBill"]].describe().T.round(2), use_container_width=True)
 
-k1, k2, k3 = st.columns(3)
-k1.metric("Promedio DaysLate", f"{df.DaysLate.mean():.2f}")
-k2.metric("Facturas tarde", f"{(df.DaysLate>0).mean()*100:.1f}%")
-k3.metric("Total facturas", f"{len(df):,}")
+# variable a estudiar
+sel_var = st.sidebar.selectbox("Variable numérica", num_cols, index=0)
 
-with st.expander("Primer vistazo"):
-    st.dataframe(df_raw.head(), use_container_width=True)
+st.subheader(f"Distribución de **{sel_var}**")
 
-# ═════════════ DISTRIBUCIONES ═════════
+col_h, col_b = st.columns(2)
+col_h.plotly_chart(px.histogram(raw_df, x=sel_var, nbins=35,
+                                color_discrete_sequence=["#2a9df4"],
+                                title="Histograma"), use_container_width=True)
+
+col_b.plotly_chart(px.box(raw_df, y=sel_var,
+                          color_discrete_sequence=["#e74c3c"],
+                          title="Boxplot"), use_container_width=True)
+
+# matriz de correlación
+with st.expander("🔥 Matriz de correlación"):
+    corr = raw_df[num_cols].corr()
+    fig_corr = go.Figure(go.Heatmap(z=corr.values,
+                                    x=corr.columns, y=corr.columns,
+                                    colorscale="RdBu_r", zmin=-1, zmax=1))
+    fig_corr.update_layout(height=600, margin=dict(l=40,r=40,b=40,t=40))
+    st.plotly_chart(fig_corr, use_container_width=True)
+
 st.markdown("---")
-st.subheader("Distribución de variables")
 
-for v in sel_nums:
-    st.markdown(f"#### {v}")
-    c1, c2 = st.columns(2)
-    c1.plotly_chart(px.histogram(df, x=v, nbins=40, color_discrete_sequence=["steelblue"]), use_container_width=True)
-    c2.plotly_chart(px.box(df, y=v, color_discrete_sequence=["firebrick"]), use_container_width=True)
+# ──────────────────────  carga modelo entrenado  ──────────────────────
+if not MODEL_FILE.exists():
+    st.error("❌ No se encontró el modelo entrenado (.pkl).")
+    st.stop()
 
-# ═════════════ SCATTER OLS ════════════
-st.markdown("---")
-st.subheader(f"Relación {sel_nums[0] if sel_nums else num_cols[0]} vs {otra_var}")
+model = joblib.load(MODEL_FILE)
 
-fig_scatter = px.scatter(
-    df,
-    x=sel_nums[0] if sel_nums else num_cols[0],
-    y=otra_var,
-    trendline="ols",
-    color_discrete_sequence=["#16a085"],
-)
-st.plotly_chart(fig_scatter, use_container_width=True)
+# métricas entrenadas (si existen)
+if META_FILE.exists():
+    with open(META_FILE) as fp:
+        meta = json.load(fp)
+    st.caption(f"Modelo XGB ▸ MAE {meta['MAE']}  |  RMSE {meta['RMSE']}  | R² {meta['R2']}")
+else:
+    st.caption("Modelo XGB cargado.")
 
-# ═════════════ HEATMAP CORR ═══════════
-st.markdown("---")
-st.subheader("Matriz de correlación")
-corr = df[num_cols].corr()
-fig_corr = go.Figure(go.Heatmap(z=corr, x=corr.columns, y=corr.columns,
-                                colorscale="RdYlBu_r", zmin=-1, zmax=1))
-fig_corr.update_layout(height=550)
-st.plotly_chart(fig_corr, use_container_width=True)
+# ──────────────────────────  predicción  ─────────────────────────────
+st.header("🧮 Predicción de **DaysLate**")
 
-# ═════════════ CONCLUSIONES ═══════════
-st.markdown(
-    """
-## 🔍 Conclusiones
+# opciones para el formulario
+country_map = {cat:i for i,cat in enumerate(raw_df["countryCode"].cat.categories)}
 
-* **InvoiceAmount** y **DaysToSettle** muestran la correlación positiva más fuerte con `DaysLate`.  
-* Aproximadamente el **60 %** de las facturas se pagan puntualmente.  
-* No se encontraron valores nulos en las columnas analizadas.
-""",
-    unsafe_allow_html=True,
-)
+with st.form("form"):
+    c1,c2 = st.columns(2)
+    with c1:
+        country = st.selectbox("countryCode", list(country_map.keys()))
+        inv_amt = st.number_input("InvoiceAmount", 0.0, 10000.0, value=60.0, step=1.0)
+        disputed  = st.selectbox("Disputed", ["No","Yes"])
+    with c2:
+        paperless = st.selectbox("PaperlessBill", ["Paper","Electronic"])
+        days_sett = st.number_input("DaysToSettle", 0, 120, value=30, step=1)
 
-# ═════════════ MODELO XGB ═════════════
-st.markdown("---")
-st.header("🧮 Predicción de DaysLate (XGB)")
+    sent = st.form_submit_button("Predecir")
 
-features = ["countryCode", "InvoiceAmount", "Disputed", "PaperlessBill", "DaysToSettle"]
-X, y = df[features], df["DaysLate"]
-X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
-
-model = XGBRegressor(
-    objective="reg:squarederror",
-    n_estimators=500,
-    max_depth=6,
-    learning_rate=0.05,
-    subsample=0.9,
-    random_state=42,
-).fit(X_tr, y_tr)
-
-preds = model.predict(X_te)
-mae  = mean_absolute_error(y_te, preds)
-rmse = mean_squared_error(y_te, preds) ** 0.5   # ← bug-fix
-r2   = r2_score(y_te, preds)
-
-st.write(f"**MAE:** {mae:.2f}   |   **RMSE:** {rmse:.2f}   |   **R²:** {r2:.3f}")
-
-# ═════════════ PREDICCIÓN INTERACTIVA ═
-st.markdown("### Predicción individual")
-
-col1, col2 = st.columns(2)
-with col1:
-    ccode = st.number_input("countryCode", value=int(df_raw.countryCode.mode()[0]))
-    disputed = st.selectbox("Disputed", ["No", "Yes"])
-with col2:
-    bill = st.selectbox("PaperlessBill", ["Paper", "Electronic"])
-    amt  = st.number_input("InvoiceAmount", 0.0, value=float(df_raw.InvoiceAmount.median()))
-settle = st.number_input("DaysToSettle", 0, value=int(df_raw.DaysToSettle.median()))
-
-if st.button("Predecir DaysLate"):
+if sent:
     row = pd.DataFrame([{
-        "countryCode": int(ccode),
-        "InvoiceAmount": float(amt),
-        "Disputed": int(disputed == "Yes"),
-        "PaperlessBill": int(bill == "Electronic"),
-        "DaysToSettle": int(settle),
+        "countryCode"  : country,
+        "InvoiceAmount": inv_amt,
+        "Disputed"     : 1 if disputed=="Yes" else 0,
+        "PaperlessBill": 1 if paperless=="Electronic" else 0,
+        "DaysToSettle" : days_sett
     }])
-    pred = float(model.predict(row)[0])
-    if pred < 0:
-        st.success(f"✅ Pago anticipado (~{abs(pred):.1f} días antes).")
+    # convertir country a código numérico según el mapeo usado al entrenar
+    row["countryCode"] = country_map[country]
+    pred = model.predict(row)[0]
+
+    if pred <= 0:
+        st.success(f"✅ Pago estimado **{abs(pred):.1f} días ANTES** del vencimiento.")
     else:
-        st.error(f"🚨 Retraso estimado: {pred:.1f} días.")
+        st.error  (f"🚨 Retraso estimado de **{pred:.1f} días**.")
 
-# ═════════════ DESCARGA MODELO ════════
-with st.expander("⬇️ Descargar modelo"):
-    buf = io.BytesIO(); joblib.dump(model, buf)
-    st.download_button("XGB model (.pkl)", buf.getvalue(), "xgb_model.pkl")
-
-st.caption("© 2025 – AR EDA + Predictor")
+st.caption("© 2025 – Demo Accounts Receivable Prediction")
