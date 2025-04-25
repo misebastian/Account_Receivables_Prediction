@@ -1,0 +1,12 @@
+{
+  "MAE": 0.02,
+  "RMSE": 0.366,
+  "R2": 0.997,
+  "features": [
+    "countryCode",
+    "InvoiceAmount",
+    "Disputed",
+    "PaperlessBill",
+    "DaysToSettle"
+  ]
+}
