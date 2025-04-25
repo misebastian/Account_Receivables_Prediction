@@ -216,7 +216,7 @@ if subm:
         "DueDate_day": due_date.day,
     }
     X_new = pd.DataFrame([row])[FEAT_COLS]
-    pred  = float(model.predict(X_new)[0])
+    pred  = int(model.predict(X_new)[0])
     if pred<=0:
         st.success(f"✅ Pago estimado {abs(pred):.1f} días antes del vencimiento.")
     else:
