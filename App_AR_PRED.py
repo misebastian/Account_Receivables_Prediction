@@ -1,129 +1,150 @@
-# ──────────────────────────────────────────────────────────────
-#  AR Predictor · Streamlit v7 – 25 Abr 2025
-#    · selector de variables en matriz de correlación
-# ──────────────────────────────────────────────────────────────
-import warnings, base64, io
+# ────────────────────────────────────────────────────────────────
+#  App_AR_PRED.py  ·  EDA + predicción DaysLate  (v5 compacto)
+#  Repo:  https://github.com/miusuario/Account_Receivables_Prediction
+# ────────────────────────────────────────────────────────────────
+import warnings, json, base64, io
 from pathlib import Path
-import numpy as np, pandas as pd
-import streamlit as st
+from datetime import date
+import numpy as np
+import pandas as pd
 import plotly.express as px
-from scipy.stats import iqr
-import joblib
+import plotly.graph_objects as go
+import joblib, streamlit as st
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-st.set_page_config("AR Predictor", "😎", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AR Predictor", layout="wide", page_icon="📈")
 warnings.filterwarnings("ignore")
 
-DATA_FILE  = Path(__file__).with_name("WA_Fn-UseC_-Accounts-Receivable.xlsx")
-MODEL_FILE = Path(__file__).with_name("ar_pipeline.pkl")
+# ---------- 1 · helpers -------------------------------------------------------
+DATA_FILE  = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
+MODEL_FILE = Path("ar_pipeline.pkl")
 
-FEAT_COLS = ["countryCode","InvoiceAmount","Disputed","PaperlessBill","DaysToSettle",
-             "InvoiceDate_year","InvoiceDate_month","InvoiceDate_day",
-             "DueDate_year","DueDate_month","DueDate_day"]
-
-#────────────  helpers  ────────────────────────────────────────
-def load_data(fp):
+@st.cache_data(show_spinner=False)
+def load_data(fp: Path)->pd.DataFrame:
     df = pd.read_excel(fp)
     df.columns = df.columns.str.strip().str.replace(" ", "_")
     df["Disputed"]      = df["Disputed"].map({"Yes":1,"No":0})
     df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic":1,"Paper":0})
     for c in ["InvoiceDate","DueDate"]:
-        dt = pd.to_datetime(df[c])
-        df[[f"{c}_year",f"{c}_month",f"{c}_day"]] = np.c_[dt.dt.year,dt.dt.month,dt.dt.day]
+        df[c]=pd.to_datetime(df[c], errors='coerce')
+        df[[f"{c}_year",f"{c}_month",f"{c}_day"]] = np.c_[
+            df[c].dt.year, df[c].dt.month, df[c].dt.day]
     return df
 
-@st.cache_data(show_spinner=False)   # datos se cachean
-def get_df(): return load_data(DATA_FILE)
-
 @st.cache_resource(show_spinner=False)
-def get_model(): return joblib.load(MODEL_FILE)
+def load_model(fp: Path):
+    return joblib.load(fp)
 
-#────────────  DATA & MODEL  ───────────────────────────────────
-raw_df = get_df()
-model  = get_model()
+# ---------- 2 · Carga ---------------------------------------------------------
+if not DATA_FILE.exists() or not MODEL_FILE.exists():
+    st.error("❌ Faltan archivos de datos o modelo en el repo.")
+    st.stop()
 
-#────────────  KPIs  ───────────────────────────────────────────
-tot_inv  = len(raw_df)
-unique_c = raw_df.customerID.nunique()
-late_pct = (raw_df.DaysLate>0).mean()*100
-avg_dl   = raw_df.DaysLate.mean()
+raw_df         = load_data(DATA_FILE)
+model          = load_model(MODEL_FILE)
+FEATURE_COLS   = model.feature_names_in_
+NUM_COLS       = raw_df.select_dtypes("number").columns.tolist()
+CAT_COLS       = [c for c in raw_df.columns if c not in NUM_COLS]
 
-st.markdown("## 📊 *Exploratorio* – Accounts Receivable")
+# ---------- 3 · KPI header ----------------------------------------------------
 k1,k2,k3,k4 = st.columns(4)
-k1.metric("Facturas", f"{tot_inv:,}")
-k2.metric("Clientes únicos", f"{unique_c:,}")
-k3.metric("% Con retraso", f"{late_pct:.1f}%")
-k4.metric("DaysLate medio", f"{avg_dl:.1f}")
-st.divider()
+k1.metric("🧾 Facturas",     f"{len(raw_df):,}")
+k2.metric("👥 Clientes",     f"{raw_df['customerID'].nunique():,}")
+k3.metric("💵 Total importe",f"${raw_df['InvoiceAmount'].sum():,.0f}")
+k4.metric("⌛ Retraso medio", f"{raw_df['DaysLate'].mean():.1f} días")
 
-#────────────  Análisis variable  ──────────────────────────────
-all_cols = raw_df.columns.tolist()
-sel = st.sidebar.selectbox("Variable para explorar", all_cols, index=all_cols.index("InvoiceAmount"))
-st.subheader(f"🔎 Análisis de **{sel}**")
+st.markdown("## 🔎 EDA interactivo")
 
-if pd.api.types.is_numeric_dtype(raw_df[sel]):
-    a,b = st.columns(2)
-    a.plotly_chart(px.histogram(raw_df,x=sel,nbins=40,color_discrete_sequence=["#3498db"],height=260),
-                   use_container_width=True)
-    b.plotly_chart(px.box(raw_df,y=sel,color_discrete_sequence=["#e74c3c"],height=260),
-                   use_container_width=True)
-    stats = pd.Series({
-        "suma":raw_df[sel].sum(),"media":raw_df[sel].mean(),
-        "mediana":raw_df[sel].median(),"std":raw_df[sel].std(),
-        "IQR":iqr(raw_df[sel])}).round(2)
-    st.dataframe(stats.to_frame("valor"))
-    corr = raw_df[[sel,"DaysLate"]].corr().iloc[0,1]
-    st.markdown(f"💡 **Correlación con DaysLate**: {corr:+.2f}")
+# ---------- 4 · Selector variable + datos previos -----------------------------
+sel = st.sidebar.selectbox("Variable para explorar", raw_df.columns, index=raw_df.columns.get_loc("InvoiceAmount"))
+
+df = raw_df  # alias corto
+
+# ―― NUMÉRICA  ---------------------------------------------------------------
+if sel in NUM_COLS:
+    colL,colR = st.columns(2)
+    hist = px.histogram(df, x=sel, nbins=40, color_discrete_sequence=["#1f77b4"])
+    box  = px.box(df, y=sel, color_discrete_sequence=["#e74c3c"])
+    colL.plotly_chart(hist, use_container_width=True)
+    colR.plotly_chart(box,  use_container_width=True)
+
+    st.dataframe(df[[sel]].describe().T.round(2))
+# ―― CATEGÓRICA  -------------------------------------------------------------
 else:
-    vc = (raw_df[sel].astype(str).value_counts().head(30)
-           .rename_axis(sel).reset_index(name="count"))
-    st.plotly_chart(px.bar(vc,x=sel,y="count",color_discrete_sequence=["#27ae60"]),
-                    use_container_width=True)
-    agg = (raw_df.groupby(sel)
-           .agg(facturas=("invoiceNumber","count"),
-                suma_monto=("InvoiceAmount","sum"),
-                retraso_medio=("DaysLate","mean"))
-           .sort_values("facturas",ascending=False).head(10).round(2))
-    st.dataframe(agg)
-    st.markdown("💡 Retraso medio máximo en: **{}**"
-                .format(", ".join(agg.retraso_medio.nlargest(3).index.astype(str))))
+    vc = df[sel].value_counts().nlargest(20)  # top-20 p/ no petar
+    fig_cat = px.bar(vc, text_auto=True, orientation="v",
+                     color_discrete_sequence=["#16a085"])
+    st.plotly_chart(fig_cat, use_container_width=True)
+    st.dataframe(vc.to_frame("conteo"))
 
-#────────────  MATRIZ DE CORRELACIÓN PERSONALIZABLE  ──────────
-with st.expander("Matriz de correlación (personalizable)"):
-    num_cols = raw_df.select_dtypes(include="number").columns.tolist()
-    sel_vars = st.multiselect("Selecciona variables numéricas (mín. 2)", num_cols,
-                              default=num_cols if len(num_cols)<=8 else num_cols[:8])
-    if len(sel_vars)>=2:
-        corr = raw_df[sel_vars].corr().round(2)
-        st.plotly_chart(px.imshow(corr,text_auto=True,color_continuous_scale="RdBu_r",
-                                  aspect="auto",height=70+40*len(sel_vars)),
-                        use_container_width=True)
+# ---------- 5 · Matriz de correlación multi-select ----------------------------
+with st.expander("🔗 Matriz de correlación (numéricas)"):
+    mult = st.multiselect("Variables a incluir",
+                          NUM_COLS,
+                          default=[c for c in NUM_COLS if c!=sel][:10])
+    corr_df = df[[sel]+mult].corr()
+    fig_corr = px.imshow(corr_df,
+                         color_continuous_scale="RdBu_r",
+                         zmin=-1,zmax=1,
+                         text_auto=".2f", aspect="auto")
+    st.plotly_chart(fig_corr, use_container_width=True)
+
+    # ------- Conclusiones auto ------------
+    st.markdown("### 📌 Conclusiones automáticas")
+    target_corr = corr_df["DaysLate"].drop("DaysLate", errors="ignore")
+    if not target_corr.empty:
+        top_pos = target_corr.sort_values(ascending=False).head(3)
+        top_neg = target_corr.sort_values().head(3)
+        st.markdown("**🔹 Variables más correlacionadas (+):** "
+                    + ", ".join(f"`{v}` ({c:.2f})" for v,c in top_pos.items()))
+        st.markdown("**🔹 Variables más correlacionadas (−):** "
+                    + ", ".join(f"`{v}` ({c:.2f})" for v,c in top_neg.items()))
     else:
-        st.info("Selecciona al menos dos variables.")
+        st.info("`DaysLate` no está en la matriz 🤷")
 
-st.divider()
+# ---------- 6 · Vista previa --------------------------------------------------
+with st.expander("🔍 Ver primeras filas"):
+    st.dataframe(df.head(8))
 
-#────────────  PREDICCIÓN  ─────────────────────────────────────
-st.markdown("## 🧮 Predicción de **DaysLate**")
+st.markdown("---")
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  7 · Predicciones
+# ──────────────────────────────────────────────────────────────────────────────
+st.header("🎯 Predicción de DaysLate")
+
 with st.form("pred"):
-    l,r = st.columns(2)
-    cc      = l.selectbox("countryCode", sorted(raw_df.countryCode.unique()))
-    amt     = l.number_input("InvoiceAmount", 0.0, 1e7, 50.0, step=10.0)
-    dispt   = l.selectbox("Disputed", ["No","Yes"])
-    paper   = l.selectbox("PaperlessBill", ["Paper","Electronic"])
-    dsettle = l.number_input("DaysToSettle", 0, 365, 30)
-    inv_d   = r.date_input("InvoiceDate", pd.Timestamp("2013-09-01"))
-    due_d   = r.date_input("DueDate",    pd.Timestamp("2013-10-01"))
-    btn     = st.form_submit_button("Predecir")
+    c1,c2 = st.columns(2)
+    country   = c1.selectbox("countryCode", sorted(df["countryCode"].unique()))
+    invdate   = c2.date_input("InvoiceDate", date(2013,9,1))
+    invamt    = c1.number_input("InvoiceAmount", 0.0, 1e7, 100.0, 1.0)
+    duedate   = c2.date_input("DueDate", date(2013,10,1))
+    disputed  = c1.selectbox("Disputed", ["No","Yes"])
+    paperless = c2.selectbox("PaperlessBill", ["Paper","Electronic"])
+    dsettle   = c1.number_input("DaysToSettle", 0, 120, 30, 1)
+    submitted = st.form_submit_button("Predecir")
 
-if btn:
-    row = {
-        "countryCode":float(cc),"InvoiceAmount":float(amt),
-        "Disputed":1.0 if dispt=="Yes" else 0.0,
-        "PaperlessBill":1.0 if paper=="Electronic" else 0.0,
-        "DaysToSettle":float(dsettle),
-        "InvoiceDate_year":inv_d.year,"InvoiceDate_month":inv_d.month,"InvoiceDate_day":inv_d.day,
-        "DueDate_year":due_d.year,"DueDate_month":due_d.month,"DueDate_day":due_d.day}
-    pred = float(model.predict(pd.DataFrame([row])[FEAT_COLS])[0])
-    st.success(f"⏱ **{pred:+.1f} días** (positivo → retraso, negativo → anticipado)")
+if submitted:
+    row = dict(
+        countryCode   = float(country),
+        InvoiceAmount = float(invamt),
+        Disputed      = 1.0 if disputed=="Yes" else 0.0,
+        PaperlessBill = 1.0 if paperless=="Electronic" else 0.0,
+        DaysToSettle  = float(dsettle),
+        InvoiceDate_year  = invdate.year,  InvoiceDate_month = invdate.month,
+        InvoiceDate_day   = invdate.day,   DueDate_year      = duedate.year,
+        DueDate_month     = duedate.month, DueDate_day       = duedate.day,
+    )
+    X_new = pd.DataFrame([row])[FEATURE_COLS]
+    try:
+        pred = float(model.predict(X_new)[0])
+        if pred <= 0:
+            st.success(f"✅ Pago estimado **{abs(pred):.1f} días antes** del vencimiento.")
+        else:
+            st.error(f"⏰ Retraso estimado de **{pred:.1f} días**.")
+    except Exception as e:
+        st.error("Error al predecir – revisa las variables.")
+        st.exception(e)
 
-st.caption("© 2025 – Demo AR Predictor v7")
+st.caption("© 2025 – Demo Accounts Receivable Prediction")
+
