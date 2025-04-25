@@ -19,7 +19,7 @@ section[data-testid="stSidebar"] > div:first-child {width: 240px;}
 # ──────────────── 1) DATA Y MODELO ───────────────────────────────
 DATA_FILE  = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
 MODEL_FILE = Path("ar_pipeline.pkl")
-META_FILE  = Path("ar_meta.json")
+META_FILE  = Path("model_meta.json")
 
 @st.cache_data(show_spinner=False)
 def load_data(fp: Path) -> pd.DataFrame:
