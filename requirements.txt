@@ -7,3 +7,4 @@ tensorflow-cpu
 joblib      
 plotly            
 openpyxl
+statsmodels 
