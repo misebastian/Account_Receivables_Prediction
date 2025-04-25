@@ -1,139 +1,130 @@
-# -----------------------------------------------------------
-# Streamlit – EDA interactivo + predicción DaysLate (XGB)
-# 25-abr-2025 – carga modelo .pkl (no re-entrena)
-# -----------------------------------------------------------
-
-import warnings, json, joblib
+# app.py  –  Streamlit AR Predictor
+# ───────────────────────────────────────────────────────────
+# Requisitos en requirements.txt
+#   streamlit>=1.32
+#   pandas numpy plotly openpyxl joblib
+#   (xgboost solo lo necesitaste para entrenar)
+# ───────────────────────────────────────────────────────────
+import streamlit as st, pandas as pd, numpy as np, joblib, json, io, requests
+import plotly.express as px, plotly.graph_objects as go
 from pathlib import Path
 from datetime import date
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
-# ──────────────────────────  configuración  ──────────────────────────
-st.set_page_config(page_title="📈 AR Prediction", page_icon="💰", layout="centered")
+# ------------------------------------------------ CONFIG
+st.set_page_config(page_title="📈 AR Predictor",
+                   page_icon="📊", layout="wide")
 st.markdown("""
 <style>
-:root { --primary-color:#2a9df4; --text-color:#e0e0e0; }
-footer, #MainMenu {visibility:hidden;}
-/* reduce ancho del sidebar */
-section[data-testid="stSidebar"] > div:first-child {width:240px;}
-/* tablas oscuras */
-thead tr th {background-color:#111!important; color:#e0e0e0!important;}
-</style>
-""", unsafe_allow_html=True)
-warnings.filterwarnings("ignore")
+section[data-testid="stSidebar"] > div:first-child {width: 240px;}
+#MainMenu, footer {visibility:hidden;}
+</style>""", unsafe_allow_html=True)
 
-# ─────────────────────────  rutas de ficheros  ────────────────────────
-DATA_FILE   = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
-MODEL_FILE  = Path("xgb_model.pkl")               # ya entrenado
-META_FILE   = Path("model_meta.json")             # opcional
+# ------------------------------------------------ 1) DATA & MODEL
+DATA_PATH  = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
+MODEL_URL  = "https://raw.githubusercontent.com/<TU-USER>/<TU-REPO>/main/ar_pipeline.pkl"
+META_URL   = "https://raw.githubusercontent.com/<TU-USER>/<TU-REPO>/main/ar_meta.json"
 
-# ────────────────────────────  carga datos  ───────────────────────────
-@st.cache_data(show_spinner="Cargando datos…")
-def load_data(fp: Path) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_data(fp:Path)->pd.DataFrame:
     df = pd.read_excel(fp)
-    df.columns = df.columns.str.strip().str.replace(" ", "_")
-    # codificación mínima
-    df["Disputed"]      = df["Disputed"].map({"Yes": 1, "No": 0})
-    df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic": 1, "Paper": 0})
-    df["countryCode"]   = df["countryCode"].astype("category")
+    df.columns = df.columns.str.strip().str.replace(" ","_")
+    df["Disputed"]      = df["Disputed"].map({"Yes":1,"No":0})
+    df["PaperlessBill"] = df["PaperlessBill"].map({"Electronic":1,"Paper":0})
+    for c in ["InvoiceDate","DueDate"]:
+        dt = pd.to_datetime(df[c])
+        df[[f"{c}_year",f"{c}_month",f"{c}_day"]] = np.c_[dt.dt.year,
+                                                          dt.dt.month,
+                                                          dt.dt.day]
     return df
+raw = load_data(DATA_PATH)
 
-if not DATA_FILE.exists():
-    st.error("❌ No se encontró el Excel de cuentas por cobrar.")
-    st.stop()
+@st.cache_resource(show_spinner=False)
+def load_model(url:str):
+    model  = joblib.load(io.BytesIO(requests.get(url).content))
+    meta   = json.loads(requests.get(META_URL).text)
+    return model, meta
+model, meta = load_model(MODEL_URL)
 
-raw_df = load_data(DATA_FILE)
-num_cols = ["InvoiceAmount", "DaysToSettle", "DaysLate"]
+FEATS = ["countryCode","InvoiceAmount","Disputed","PaperlessBill",
+         "DaysToSettle","InvoiceDate_year","InvoiceDate_month",
+         "InvoiceDate_day","DueDate_year","DueDate_month","DueDate_day"]
 
-# ──────────────────────────────  EDA  ────────────────────────────────
-st.title("Exploratorio de cuentas por cobrar")
+# ------------------------------------------------ 2) KPI HEADER
+st.title("📊 Exploratorio – Accounts Receivable")
 
-kpi1, kpi2 = st.columns(2)
-kpi1.metric("Media DaysLate",  f"{raw_df['DaysLate'].mean():.2f}")
-kpi2.metric("Desv. típica",   f"{raw_df['DaysLate'].std():.2f}")
+colA,colB,colC,colD = st.columns(4)
+colA.metric("Facturas",&nbsp;f"{len(raw):,}")
+colB.metric("Prom. DaysLate", f"{raw['DaysLate'].mean():.2f}")
+colC.metric("% a Tiempo",
+            f"{(raw['DaysLate']<=0).mean()*100:.1f}%")
+colD.metric("% Retraso > 5 días",
+            f"{(raw['DaysLate']>5).mean()*100:.1f}%")
 
-with st.expander("📋  Tabla descriptiva"):
-    st.dataframe(raw_df[num_cols + ["Disputed","PaperlessBill"]].describe().T.round(2), use_container_width=True)
+st.divider()
 
-# variable a estudiar
-sel_var = st.sidebar.selectbox("Variable numérica", num_cols, index=0)
+# ------------------------------------------------ 3) VARIABLE EXPLORER
+num_vars = [c for c,d in zip(raw.columns,raw.dtypes) if d!='object' and c!="DaysLate"]
+sel = st.sidebar.selectbox("Variable de interés", sorted(num_vars),
+                           index= num_vars.index("InvoiceAmount") )
 
-st.subheader(f"Distribución de **{sel_var}**")
+tab1,tab2 = st.tabs(["Distribución","Correlación"])
 
-col_h, col_b = st.columns(2)
-col_h.plotly_chart(px.histogram(raw_df, x=sel_var, nbins=35,
-                                color_discrete_sequence=["#2a9df4"],
-                                title="Histograma"), use_container_width=True)
-
-col_b.plotly_chart(px.box(raw_df, y=sel_var,
-                          color_discrete_sequence=["#e74c3c"],
-                          title="Boxplot"), use_container_width=True)
-
-# matriz de correlación
-with st.expander("🔥 Matriz de correlación"):
-    corr = raw_df[num_cols].corr()
-    fig_corr = go.Figure(go.Heatmap(z=corr.values,
-                                    x=corr.columns, y=corr.columns,
-                                    colorscale="RdBu_r", zmin=-1, zmax=1))
-    fig_corr.update_layout(height=600, margin=dict(l=40,r=40,b=40,t=40))
-    st.plotly_chart(fig_corr, use_container_width=True)
-
-st.markdown("---")
-
-# ──────────────────────  carga modelo entrenado  ──────────────────────
-if not MODEL_FILE.exists():
-    st.error("❌ No se encontró el modelo entrenado (.pkl).")
-    st.stop()
-
-model = joblib.load(MODEL_FILE)
-
-# métricas entrenadas (si existen)
-if META_FILE.exists():
-    with open(META_FILE) as fp:
-        meta = json.load(fp)
-    st.caption(f"Modelo XGB ▸ MAE {meta['MAE']}  |  RMSE {meta['RMSE']}  | R² {meta['R2']}")
-else:
-    st.caption("Modelo XGB cargado.")
-
-# ──────────────────────────  predicción  ─────────────────────────────
-st.header("🧮 Predicción de **DaysLate**")
-
-# opciones para el formulario
-country_map = {cat:i for i,cat in enumerate(raw_df["countryCode"].cat.categories)}
-
-with st.form("form"):
+with tab1:
     c1,c2 = st.columns(2)
-    with c1:
-        country = st.selectbox("countryCode", list(country_map.keys()))
-        inv_amt = st.number_input("InvoiceAmount", 0.0, 10000.0, value=60.0, step=1.0)
-        disputed  = st.selectbox("Disputed", ["No","Yes"])
-    with c2:
-        paperless = st.selectbox("PaperlessBill", ["Paper","Electronic"])
-        days_sett = st.number_input("DaysToSettle", 0, 120, value=30, step=1)
+    c1.plotly_chart(px.histogram(raw,x=sel,nbins=40,
+                                 color_discrete_sequence=["#3498db"],
+                                 title=f"Histograma – {sel}"),
+                    use_container_width=True)
+    c2.plotly_chart(px.box(raw,y=sel,title=f"Boxplot – {sel}",
+                           color_discrete_sequence=["#e74c3c"]),
+                    use_container_width=True)
+    st.dataframe(raw[sel].describe().to_frame().T.round(2))
 
-    sent = st.form_submit_button("Predecir")
+with tab2:
+    corr = raw[num_vars+["DaysLate"]].corr()
+    fig  = go.Figure(go.Heatmap(z=corr.values, x=corr.columns,
+                                y=corr.columns, colorscale="RdBu",
+                                zmin=-1,zmax=1))
+    fig.update_layout(height=500,margin=dict(l=10,r=10,t=30,b=10))
+    st.plotly_chart(fig,use_container_width=True)
 
-if sent:
-    row = pd.DataFrame([{
-        "countryCode"  : country,
-        "InvoiceAmount": inv_amt,
-        "Disputed"     : 1 if disputed=="Yes" else 0,
-        "PaperlessBill": 1 if paperless=="Electronic" else 0,
-        "DaysToSettle" : days_sett
-    }])
-    # convertir country a código numérico según el mapeo usado al entrenar
-    row["countryCode"] = country_map[country]
-    pred = model.predict(row)[0]
+st.divider()
 
-    if pred <= 0:
-        st.success(f"✅ Pago estimado **{abs(pred):.1f} días ANTES** del vencimiento.")
+# ------------------------------------------------ 4) PREDICTOR
+st.header("🧮 Predicción de *DaysLate*")
+
+with st.form("pred"):
+    cL,cR = st.columns(2)
+    with cL:
+        cc   = st.selectbox("countryCode", sorted(raw["countryCode"].unique()))
+        inv  = st.number_input("InvoiceAmount",0.0,value=float(raw["InvoiceAmount"].median()))
+        disp = st.selectbox("Disputed",["No","Yes"])
+        pap  = st.selectbox("PaperlessBill",["Paper","Electronic"])
+        dsett= st.number_input("DaysToSettle",0,value=int(raw["DaysToSettle"].median()))
+    with cR:
+        idate= st.date_input("InvoiceDate",date(2013,9,1))
+        ddate= st.date_input("DueDate",    date(2013,10,1))
+    go_btn = st.form_submit_button("Predecir")
+
+if go_btn:
+    row = {
+        "countryCode": cc,
+        "InvoiceAmount": inv,
+        "Disputed":      1 if disp=="Yes" else 0,
+        "PaperlessBill": 1 if pap=="Electronic" else 0,
+        "DaysToSettle":  dsett,
+        "InvoiceDate_year":  idate.year,
+        "InvoiceDate_month": idate.month,
+        "InvoiceDate_day":   idate.day,
+        "DueDate_year":  ddate.year,
+        "DueDate_month": ddate.month,
+        "DueDate_day":   ddate.day
+    }
+    Xnew = pd.DataFrame([row])[FEATS]
+    pred = float(model.predict(Xnew)[0])
+    if pred<0:
+        st.success(f"✅ Pago estimado **{abs(pred):.1f} días antes** del vencimiento.")
     else:
-        st.error  (f"🚨 Retraso estimado de **{pred:.1f} días**.")
+        st.error  (f"🚨 Retraso estimado: **{pred:.1f} días**")
 
-st.caption("© 2025 – Demo Accounts Receivable Prediction")
+st.caption(f"Modelo MAE {meta['MAE']:.2f}  |  RMSE {meta['RMSE']:.2f}  |  R² {meta['R2']:.3f}")
