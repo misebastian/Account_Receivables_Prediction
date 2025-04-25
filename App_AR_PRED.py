@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from pathlib import Path
 from datetime import date
 
+from tensorflow.keras import layers
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -141,7 +142,8 @@ def build_dataset(df_core, df_all, dim=None):
     ])
     model.compile(optimizer="adam", loss="mae")
     model.fit(cust_idx, df_all["DaysLate"], epochs=20, batch_size=256, validation_split=0.1, verbose=0)
-    emb = model.layers[1].get_weights()[0]
+    embedding_layer = next(l for l in model.layers if isinstance(l, layers.Embedding))
+    emb = embedding_layer.get_weights()[0]
     emb_cols = [f"cust_emb_{i}" for i in range(dim)]
     emb_df = pd.DataFrame(emb, columns=emb_cols)
     emb_df["cust_idx"] = np.arange(n_cust)
