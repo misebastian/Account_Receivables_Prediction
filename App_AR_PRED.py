@@ -21,7 +21,7 @@ section[data-testid="stSidebar"] > div:first-child {width: 240px;}
 
 # ------------------------------------------------ 1) DATA & MODEL
 DATA_PATH  = Path("WA_Fn-UseC_-Accounts-Receivable.xlsx")
-MODEL_URL  = "https://raw.githubusercontent.com/<TU-USER>/<TU-REPO>/main/ar_pipeline.pkl"
+MODEL_URL = Path("ar_pipeline.pkl").read_bytes()  # para cargar local
 META_URL   = "https://raw.githubusercontent.com/<TU-USER>/<TU-REPO>/main/ar_meta.json"
 
 @st.cache_data(show_spinner=False)
